@@ -2,6 +2,7 @@ import os
 import copy
 import torch
 import torch.ao.quantization as quantization
+import torchvision.transforms as transforms
 from src.models.student import get_student_model
 
 
@@ -23,6 +24,8 @@ def quantize_student_model(model_fp32, calibration_loader, num_calibration_batch
     torch.backends.quantized.engine = engine
     print(f"[Quantization] Target quantization engine: {engine}")
 
+    norm_transform = transforms.Normalize(mean=[0.3444, 0.3803, 0.4078], std=[0.2024, 0.1368, 0.1157])
+
     # Prepare CPU copy in eval mode
     model_cpu = copy.deepcopy(model_fp32).to('cpu').eval()
 
@@ -41,7 +44,10 @@ def quantize_student_model(model_fp32, calibration_loader, num_calibration_batch
         for i, (images, _) in enumerate(calibration_loader):
             if i >= num_calibration_batches:
                 break
-            images_cpu = images.to('cpu')
+            if images.min() >= 0.0 and images.max() <= 1.0:
+                images_cpu = norm_transform(images).to('cpu')
+            else:
+                images_cpu = images.to('cpu')
             prepared_model(images_cpu)
 
     # Convert calibrated model to INT8

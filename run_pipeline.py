@@ -3,7 +3,7 @@ import sys
 import time
 import argparse
 
-from src.dataset import create_mini_split, generate_sample_visualizations
+from src.dataset import get_eurosat_datasets, generate_sample_visualizations
 from train_teacher import train_teacher
 from train_student import train_student
 from quantize_student import run_quantization
@@ -30,14 +30,12 @@ def main():
     # Phase 1: Dynamic Noise-Aware Data Pipeline
     # ---------------------------------------------------------
     print("\n>>> PHASE 1: Dynamic Noise-Aware Data Pipeline & Dataset Prep")
-    data_dir = create_mini_split(
-        source_dir='./data/eurosat/2750',
-        target_dir='./data/eurosat_2000',
-        num_per_class=200,
-        seed=42
-    )
+    data_dir = './data'
+    train_set, test_set = get_eurosat_datasets(root=data_dir, download=True)
+    print(f"[Dataset] Official EuroSAT subset loaded: {len(train_set)} Train / {len(test_set)} Test patches (Batch size: {args.batch_size})")
+
     generate_sample_visualizations(
-        dataset_dir=data_dir,
+        root=data_dir,
         output_path='deliverables/sample_augmentations.png'
     )
 

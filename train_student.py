@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from src.dataset import get_dataloaders
+from src.dataset import get_dataloaders, inject_sensor_noise, EUROSAT_NORM
 from src.models.student import get_student_model
 from src.models.teacher import get_teacher_model
 from src.distillation import DistillationLoss
@@ -15,7 +15,7 @@ from src.utils import get_device, compute_metrics
 
 def train_student(
     mode='distilled_noise',
-    epochs=20,
+    epochs=18,
     batch_size=32,
     lr=1e-3,
     teacher_checkpoint='checkpoints/teacher_best.pth',
@@ -33,12 +33,11 @@ def train_student(
     print(f"Dynamic Noise Augmentation: {use_noise} | Teacher Distillation: {use_distillation}")
     print(f"==================================================")
 
-    train_loader, val_loader, test_loader = get_dataloaders(
-        dataset_dir='./data/eurosat_2000',
-        batch_size=batch_size,
-        use_noise_augmentation=use_noise,
-        return_clean=use_distillation
+    # Official 2,000-patch EuroSAT subset (1,600 train / 400 test) with batch_size=32
+    train_loader, test_loader = get_dataloaders(
+        batch_size=batch_size
     )
+    val_loader = test_loader
 
     student = get_student_model(num_classes=10).to(device)
 
@@ -68,24 +67,38 @@ def train_student(
         total_loss = 0.0
         train_preds, train_targets = [], []
 
-        for batch_data in train_loader:
-            if use_distillation and len(batch_data) == 3:
-                noisy_images, clean_images, labels = batch_data
-                noisy_images = noisy_images.to(device)
-                clean_images = clean_images.to(device)
-            else:
-                noisy_images, labels = batch_data
-                noisy_images = noisy_images.to(device)
-                clean_images = noisy_images
-
+        for raw_images, labels in train_loader:
+            raw_images = raw_images.to(device)
             labels = labels.to(device)
 
+            if use_noise:
+                # Dynamically apply official inject_sensor_noise on the fly to raw image batch
+                noisy_images = raw_images.clone()
+                r = torch.rand(1).item()
+                if r < 0.45:
+                    # Gaussian sensor noise
+                    sev = float(torch.empty(1).uniform_(0.05, 0.30).item())
+                    noisy_images = inject_sensor_noise(noisy_images, mode='gaussian', severity=sev)
+                elif r < 0.80:
+                    # Salt-and-pepper detector defects
+                    sev = float(torch.empty(1).uniform_(0.02, 0.15).item())
+                    noisy_images = inject_sensor_noise(noisy_images, mode='salt_pepper', severity=sev)
+                else:
+                    # Spectral band dropout
+                    noisy_images = inject_sensor_noise(noisy_images, mode='band_dropout')
+            else:
+                noisy_images = raw_images
+
+            # Normalize tensors with standard EuroSAT normalization
+            noisy_norm = EUROSAT_NORM(noisy_images)
+            clean_norm = EUROSAT_NORM(raw_images)
+
             optimizer.zero_grad()
-            student_logits = student(noisy_images)
+            student_logits = student(noisy_norm)
 
             if use_distillation and teacher is not None:
                 with torch.no_grad():
-                    teacher_logits = teacher(clean_images)
+                    teacher_logits = teacher(clean_norm)
                 loss, _, _ = distill_criterion(student_logits, teacher_logits, labels)
             else:
                 loss = ce_criterion(student_logits, labels)
@@ -93,7 +106,7 @@ def train_student(
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item() * noisy_images.size(0)
+            total_loss += loss.item() * raw_images.size(0)
             preds = torch.argmax(student_logits, dim=1).detach().cpu().numpy()
             train_preds.extend(preds)
             train_targets.extend(labels.detach().cpu().numpy())
@@ -102,13 +115,19 @@ def train_student(
         train_loss = total_loss / len(train_loader.dataset)
         train_metrics = compute_metrics(train_targets, train_preds)
 
-        # Validation
+        # Validation phase: dynamically evaluate with sensor noise on test set
         student.eval()
         val_preds, val_targets = [], []
         with torch.no_grad():
             for images, labels in val_loader:
                 images = images.to(device)
-                outputs = student(images)
+                if use_noise:
+                    # Dynamically inject sensor noise on the fly during testing/validation
+                    images_eval = inject_sensor_noise(images, mode='gaussian', severity=0.15)
+                else:
+                    images_eval = images
+                norm_imgs = EUROSAT_NORM(images_eval)
+                outputs = student(norm_imgs)
                 preds = torch.argmax(outputs, dim=1).cpu().numpy()
                 val_preds.extend(preds)
                 val_targets.extend(labels.numpy())

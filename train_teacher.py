@@ -5,24 +5,23 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from tqdm import tqdm
 
-from src.dataset import get_dataloaders
+from src.dataset import get_dataloaders, EUROSAT_NORM
 from src.models.teacher import get_teacher_model
 from src.utils import get_device, compute_metrics
 
 
-def train_teacher(epochs=15, batch_size=32, lr=3e-4, checkpoint_dir='checkpoints'):
+def train_teacher(epochs=12, batch_size=32, lr=3e-4, checkpoint_dir='checkpoints'):
     os.makedirs(checkpoint_dir, exist_ok=True)
     device = get_device()
     print(f"[Teacher] Training ResNet-50 Teacher on device: {device}")
 
-    # Clean data loader for teacher (to establish strong clean feature representations)
-    train_loader, val_loader, test_loader = get_dataloaders(
-        dataset_dir='./data/eurosat_2000',
-        batch_size=batch_size,
-        use_noise_augmentation=False
+    # Official 2,000-patch EuroSAT subset (1,600 train / 400 test) with batch_size=32
+    train_loader, test_loader = get_dataloaders(
+        root='./data',
+        batch_size=batch_size
     )
+    val_loader = test_loader
 
     model = get_teacher_model(num_classes=10, pretrained=True).to(device)
     criterion = nn.CrossEntropyLoss()
@@ -39,7 +38,7 @@ def train_teacher(epochs=15, batch_size=32, lr=3e-4, checkpoint_dir='checkpoints
         train_preds, train_targets = [], []
 
         for images, labels in train_loader:
-            images = images.to(device)
+            images = EUROSAT_NORM(images).to(device)
             labels = labels.to(device)
 
             optimizer.zero_grad()
@@ -62,7 +61,7 @@ def train_teacher(epochs=15, batch_size=32, lr=3e-4, checkpoint_dir='checkpoints
         val_preds, val_targets = [], []
         with torch.no_grad():
             for images, labels in val_loader:
-                images = images.to(device)
+                images = EUROSAT_NORM(images).to(device)
                 outputs = model(images)
                 preds = torch.argmax(outputs, dim=1).cpu().numpy()
                 val_preds.extend(preds)

@@ -2,7 +2,7 @@ import os
 import argparse
 import torch
 
-from src.dataset import get_dataloaders
+from src.dataset import get_dataloaders, EUROSAT_NORM
 from src.models.student import get_student_model
 from src.models.quantization import quantize_student_model, save_quantized_model, get_model_size_mb
 from src.utils import measure_cpu_latency_ms, compute_metrics
@@ -31,11 +31,10 @@ def run_quantization(
     lat_fp32 = measure_cpu_latency_ms(student_fp32, num_warmup=20, num_iter=100)
     print(f"[FP32 Baseline] CPU Latency: {lat_fp32['mean_latency_ms']:.2f} ms ± {lat_fp32['std_latency_ms']:.2f} ms")
 
-    # 2. Calibration DataLoader (Representative Satellite Patches)
-    train_loader, val_loader, test_loader = get_dataloaders(
-        dataset_dir='./data/eurosat_2000',
-        batch_size=32,
-        use_noise_augmentation=False
+    # 2. Calibration DataLoader (Representative Satellite Patches from official EuroSAT subset)
+    train_loader, test_loader = get_dataloaders(
+        root='./data',
+        batch_size=32
     )
 
     # 3. Apply Static Post-Training Quantization
@@ -52,12 +51,12 @@ def run_quantization(
     lat_int8 = measure_cpu_latency_ms(quantized_student, num_warmup=20, num_iter=100)
     print(f"[INT8 Quantized] CPU Latency: {lat_int8['mean_latency_ms']:.2f} ms ± {lat_int8['std_latency_ms']:.2f} ms")
 
-    # 6. Sanity check test accuracy
+    # 6. Sanity check test accuracy on official test split
     print("[Quantization] Evaluating INT8 test accuracy vs FP32 test accuracy...")
     test_preds_fp32, test_preds_int8, test_targets = [], [], []
     with torch.no_grad():
         for images, labels in test_loader:
-            images_cpu = images.to('cpu')
+            images_cpu = EUROSAT_NORM(images).to('cpu')
             out_fp32 = student_fp32(images_cpu)
             out_int8 = quantized_student(images_cpu)
 

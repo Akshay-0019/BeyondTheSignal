@@ -7,11 +7,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.dataset import (
-    SatelliteDataset,
+    get_dataloaders,
+    inject_sensor_noise,
     EUROSAT_CLASSES,
-    GaussianNoiseTransform,
-    SaltAndPepperNoiseTransform,
-    BandDropoutTransform
+    EUROSAT_NORM
 )
 from src.models.teacher import get_teacher_model
 from src.models.student import get_student_model
@@ -21,31 +20,25 @@ from src.visualize import plot_f1_vs_noise, plot_latency_accuracy_tradeoff, plot
 
 
 class FixedNoiseEvaluator:
-    """Applies exact fixed synthetic noise levels to test batches for benchmarking."""
-    def __init__(self, noise_type='clean', param=0.0):
+    """Applies exact fixed synthetic noise levels to test batches using inject_sensor_noise."""
+    def __init__(self, noise_type='Clean', param=0.0):
         self.noise_type = noise_type
         self.param = param
 
-        if noise_type == 'Gaussian':
-            self.transform = GaussianNoiseTransform(std_range=(param, param), p=1.0)
-        elif noise_type == 'Salt & Pepper':
-            self.transform = SaltAndPepperNoiseTransform(amount_range=(param, param), p=1.0)
-        elif noise_type == 'Band Dropout':
-            self.transform = BandDropoutTransform(max_bands=int(param), p=1.0)
-        else:
-            self.transform = None
-
-    def apply(self, images_unnorm, norm_transform):
-        if self.transform is not None:
-            noisy = torch.stack([self.transform(img) for img in images_unnorm])
+    def apply(self, images_unnorm, norm_transform=EUROSAT_NORM):
+        if self.noise_type == 'Gaussian':
+            noisy = inject_sensor_noise(images_unnorm, mode='gaussian', severity=self.param)
+        elif self.noise_type == 'Salt & Pepper':
+            noisy = inject_sensor_noise(images_unnorm, mode='salt_pepper', severity=self.param)
+        elif self.noise_type == 'Band Dropout':
+            noisy = inject_sensor_noise(images_unnorm, mode='band_dropout', severity=self.param)
         else:
             noisy = images_unnorm
-        # Apply standard EuroSAT normalization
-        return torch.stack([norm_transform(img) for img in noisy])
+        return norm_transform(noisy)
 
 
 def run_evaluation(
-    data_dir='./data/eurosat_2000',
+    data_dir='./data',
     deliverables_dir='deliverables',
     checkpoints_dir='checkpoints'
 ):
@@ -54,9 +47,8 @@ def run_evaluation(
     print("==================================================")
     os.makedirs(deliverables_dir, exist_ok=True)
 
-    # Prepare unnormalized test dataset so noise is injected into raw sensor signals
-    test_ds = SatelliteDataset(os.path.join(data_dir, 'test'), dynamic_noise=None, normalize=False)
-    test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
+    # Official 2,000-patch EuroSAT subset (1,600 train / 400 test) with batch_size=32
+    _, test_loader = get_dataloaders(root=data_dir, batch_size=32)
 
     # 1. Discover and load candidate models
     models_to_test = {}
@@ -129,24 +121,23 @@ def run_evaluation(
         footprint_cache[name] = size_mb
         print(f"[{name}] Footprint: {size_mb:.3f} MB | CPU Latency: {lat_info['mean_latency_ms']:.2f} ms (p95: {lat_info['p95_latency_ms']:.2f} ms)")
 
-    # 3. Define Stress Test Matrix
-    # Gradual noise severity levels:
+    # 3. Define Stress Test Matrix across 12 noise severity settings + Clean baseline
     test_conditions = [
         # Clean baseline
         ('Clean', 0.0, 'Clean (Baseline)'),
-        # Gaussian Noise levels (std dev)
+        # Gaussian Noise levels (std dev) - 5 settings
         ('Gaussian', 0.05, 'Gaussian σ=0.05'),
         ('Gaussian', 0.10, 'Gaussian σ=0.10'),
         ('Gaussian', 0.20, 'Gaussian σ=0.20'),
         ('Gaussian', 0.30, 'Gaussian σ=0.30'),
         ('Gaussian', 0.40, 'Gaussian σ=0.40'),
-        # Salt & Pepper Pixel Defects (fraction)
+        # Salt & Pepper Pixel Defects (fraction) - 5 settings
         ('Salt & Pepper', 0.02, 'S&P 2%'),
         ('Salt & Pepper', 0.05, 'S&P 5%'),
         ('Salt & Pepper', 0.10, 'S&P 10%'),
         ('Salt & Pepper', 0.15, 'S&P 15%'),
         ('Salt & Pepper', 0.20, 'S&P 20%'),
-        # Band Dropout (number of bands lost)
+        # Band Dropout (number of bands lost) - 2 settings
         ('Band Dropout', 1.0, 'Band Dropout (1 band)'),
         ('Band Dropout', 2.0, 'Band Dropout (2 bands)'),
     ]
@@ -155,13 +146,16 @@ def run_evaluation(
     best_cm = None
 
     print("\n--- Executing Headless Noise Robustness Evaluation Loop ---")
+    raw_test_batches = [(imgs.clone(), lbls.clone()) for imgs, lbls in test_loader]
+
     for n_type, n_param, condition_label in test_conditions:
         evaluator = FixedNoiseEvaluator(noise_type=n_type, param=n_param)
 
-        # Pre-generate noisy normalized batches for test set
+        # Pre-generate noisy normalized batches on the fly with reproducible seed
+        torch.manual_seed(42 + int(n_param * 100))
         test_batches = []
-        for raw_imgs, labels in test_loader:
-            norm_imgs = evaluator.apply(raw_imgs, test_ds.norm_transform)
+        for raw_imgs, labels in raw_test_batches:
+            norm_imgs = evaluator.apply(raw_imgs, EUROSAT_NORM)
             test_batches.append((norm_imgs, labels))
 
         for model_name, info in models_to_test.items():
@@ -248,9 +242,17 @@ def run_evaluation(
     print("- `f1_vs_noise_severity.png`")
     print("- `latency_vs_accuracy_tradeoff.png`")
     print("- `confusion_matrix.png`")
-    print("- `sample_augmentations.png`")
-    print("")
 
 
 if __name__ == '__main__':
-    run_evaluation()
+    parser = argparse.ArgumentParser(description="Headless Evaluation of Edge Satellite Models")
+    parser.add_argument('--data-dir', type=str, default='./data', help="EuroSAT data directory")
+    parser.add_argument('--deliverables-dir', type=str, default='deliverables', help="Output directory")
+    parser.add_argument('--checkpoints-dir', type=str, default='checkpoints', help="Checkpoints directory")
+    args = parser.parse_args()
+
+    run_evaluation(
+        data_dir=args.data_dir,
+        deliverables_dir=args.deliverables_dir,
+        checkpoints_dir=args.checkpoints_dir
+    )
