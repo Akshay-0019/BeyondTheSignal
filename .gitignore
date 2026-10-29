@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Datasets & raw images
+data/
+
+# Large checkpoints (GitHub has a strict 100MB file limit; ResNet-50 teacher is 90MB)
+checkpoints/teacher_best.pth
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*~
